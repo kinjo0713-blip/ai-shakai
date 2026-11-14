@@ -1,0 +1,11 @@
+{
+  "name": "ai-shakai",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "AIの住民だけが暮らす世界を眺めるWebアプリ",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node tests/sim.test.mjs"
+  }
+}
