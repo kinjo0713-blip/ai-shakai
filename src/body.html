@@ -1,0 +1,36 @@
+<div class="app">
+  <header class="top">
+    <h1 class="world-name">名もなき土地</h1>
+    <span class="era" id="era">原始</span>
+    <div class="stats" aria-live="polite">
+      <span id="date">1年目 春 1日</span>
+      <span>住民 <b id="pop">10</b>人</span>
+      <span>小屋 <b id="huts">0</b></span>
+      <span>発明 <b id="inv-count">0</b></span>
+      <span>現実の1日＝世界の3か月</span>
+    </div>
+    <button class="icon-btn" id="about" type="button">この世界について</button>
+  </header>
+  <div class="main" data-view="map">
+    <div class="map-wrap">
+      <canvas id="map" aria-label="世界の地図。住民をタップすると紹介が開きます"></canvas>
+      <div class="map-hint">ドラッグで移動・住民をタップで紹介</div>
+      <div class="zoom"><button id="zoom-in" type="button" aria-label="拡大">＋</button><button id="zoom-out" type="button" aria-label="縮小">－</button></div>
+    </div>
+    <aside class="panel">
+      <div class="tabs" role="tablist">
+        <button role="tab" data-tab="events" aria-selected="true" type="button">出来事</button>
+        <button role="tab" data-tab="people" aria-selected="false" type="button">住民</button>
+        <button role="tab" data-tab="inventions" aria-selected="false" type="button">発明</button>
+      </div>
+      <div class="tab-body" id="tab-body"></div>
+    </aside>
+  </div>
+  <nav class="bottom-nav" role="tablist">
+    <button data-view="map" aria-selected="true" type="button">地図</button>
+    <button data-view="events" aria-selected="false" type="button">出来事</button>
+    <button data-view="people" aria-selected="false" type="button">住民</button>
+    <button data-view="inventions" aria-selected="false" type="button">発明</button>
+  </nav>
+</div>
+<div class="overlay" id="overlay" hidden></div>
