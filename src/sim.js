@@ -179,7 +179,15 @@
     return r;
   }
 
-  const byId = (st, id) => st.residents.find((r) => r.id === id);
+  const idIndex = new WeakMap();
+  function byId(st, id) {
+    let m = idIndex.get(st.residents);
+    if (!m || m.size !== st.residents.length) {
+      m = new Map(st.residents.map((r) => [r.id, r]));
+      idIndex.set(st.residents, m);
+    }
+    return m.get(id);
+  }
   const age = (st, r) => (r.deathDay ?? st.day) - r.birthDay;
   const ageYears = (st, r) => Math.floor(age(st, r) / DAYS_PER_YEAR);
   const alive = (st) => st.residents.filter((r) => r.alive);
@@ -203,7 +211,7 @@
 
   function remember(st, r, text) {
     r.memories.push({ day: st.day, text });
-    if (r.memories.length > 24) r.memories.shift();
+    if (r.memories.length > 16) r.memories.shift();
   }
 
   function log(st, kind, text, ids, major) {
@@ -236,6 +244,8 @@
       era: 'primitive',
       villageReady: false,
       events: [],
+      posts: [],
+      nextPostId: 1,
       nextId: 1,
       stats: { births: 0, deaths: 0 },
       lastFamineDay: -9999,
@@ -367,8 +377,10 @@
       if (r.partnerId || r.sex !== 'm') continue;
       const a = age(st, r);
       if (a < yearsToDays(16) || a > yearsToDays(48)) continue;
-      for (const o of living) {
-        if (o.sex !== 'f' || o.partnerId) continue;
+      for (const k in r.affinity) {
+        if (r.affinity[k] < 35) continue;
+        const o = byId(st, +k);
+        if (!o || !o.alive || o.sex !== 'f' || o.partnerId) continue;
         const b = age(st, o);
         if (b < yearsToDays(16) || b > yearsToDays(45)) continue;
         if (r.parentIds.some((p) => o.parentIds.includes(p))) continue;
@@ -432,6 +444,7 @@
     const dayOfSeason = st.day % DAYS_PER_SEASON;
     if (dayOfSeason === 0) {
       if (season === 0) {
+        prune(st);
         const pop = alive(st).length;
         log(st, 'year', `${Math.floor(st.day / DAYS_PER_YEAR) + 1}年目の春が来た。住民は${pop}人`, [], false);
       }
@@ -458,6 +471,120 @@
       st.villageReady = true;
       log(st, 'era', '畑が広がり、人も増えた。ここはもう「村」と呼べるかもしれない', [], true);
     }
+
+    makePosts(st, season);
+  }
+
+  // ---- つぶやき（決まりごとで作る。第2段階の後半で、大事な場面だけAIが書く） ----
+  const POST_LINES = {
+    gather: ['森で木の実をたくさん見つけた', 'きのこを採った。食べられるかは、明日のお腹が教えてくれる', '{season}の森はいいにおいがする', '甘い実のなる木を見つけた。場所は秘密', 'カゴいっぱいに草の根を掘った', '今日は何も見つからなかった。森がけちだ'],
+    hunt: ['大きなシカを追いかけたが、逃げられた', '獲物をしとめた。今夜はごちそうだ', '足あとを三日追っている。もうすぐだ', '{friend}と二人でイノシシを追い込んだ', '獣の気配がない日は、空ばかり見ている'],
+    fish: ['水辺で魚を{n}匹つかまえた', '今日は一匹もかからなかった', '{season}の水は冷たい', '水に映った自分の顔を、しばらく見ていた', '大きな魚が跳ねた。明日こそ'],
+    farm: ['畑に芽が出た', '雨が降ってほしい', '土をいじっていると落ち着く', '{friend}が畑を手伝ってくれた'],
+    child: ['{friend}と石を投げて遊んだ', '大きくなったら{dream}をやりたい', '虫をつかまえた。見せたらみんな逃げた', '火のそばで昔話を聞いた'],
+    elder: ['若いころは、このあたりにも大きな獣がいた', '{friend}は、わしの若いころにそっくりだ', '腰が痛い。でも口はまだ動く', '星の並びで季節がわかる。若い者に教えておこう'],
+    hungry: ['お腹がすいた', '木の皮でもかじりたい気分だ', '{friend}が少し食べ物を分けてくれた', '次の季節まで、もつだろうか'],
+    cold: ['寒い。火のそばから離れたくない', '指先の感覚がない', '吐く息が白い'],
+    coldNoFire: ['寒い。みんなで身を寄せ合って眠った', '夜が長くて、こわい'],
+    friend: ['{friend}といると落ち着く', '{friend}とくだらない話で笑った', '{friend}に助けられた。借りができた'],
+    enemy: ['{enemy}とは、もう口をききたくない', '{enemy}がまた文句を言っている'],
+  };
+  const SEASON_WORDS = ['春', '夏', '秋', '冬'];
+
+  function fill(st, text, r) {
+    const needsPeople = text.includes('{friend}') || text.includes('{enemy}');
+    const friends = !needsPeople ? [] : Object.entries(r.affinity).filter(([, v]) => v > 15).map(([k]) => byId(st, +k)).filter((o) => o && o.alive);
+    const enemies = !needsPeople ? [] : Object.entries(r.affinity).filter(([, v]) => v < -30).map(([k]) => byId(st, +k)).filter((o) => o && o.alive);
+    if (text.includes('{friend}') && !friends.length) return null;
+    if (text.includes('{enemy}') && !enemies.length) return null;
+    return text
+      .replace('{friend}', friends.length ? pick(st, friends).name : '')
+      .replace('{enemy}', enemies.length ? pick(st, enemies).name : '')
+      .replace('{season}', SEASON_WORDS[Math.floor((st.day % DAYS_PER_YEAR) / DAYS_PER_SEASON)])
+      .replace('{n}', String(2 + Math.floor(rand(st) * 5)))
+      .replace('{dream}', pick(st, ['狩り', '漁', '採集', has(st, 'farming') ? '畑仕事' : '火の番']));
+  }
+
+  function addPost(st, r, text, kind) {
+    if (!text) return;
+    const fans = Object.values(r.affinity).filter((v) => v > 20).length;
+    st.posts.push({
+      id: st.nextPostId++,
+      day: st.day,
+      t: 0.3 + rand(st) * 0.6,
+      by: r.id,
+      text,
+      kind: kind || 'daily',
+      gesture: !has(st, 'words'),
+      likes: Math.max(0, Math.round(fans * (0.4 + rand(st) * 0.6) + (kind === 'big' ? 3 : 0))),
+    });
+    if (st.posts.length > 450) st.posts.splice(0, st.posts.length - 450);
+  }
+
+  function makePosts(st, season) {
+    if (!st.posts) { st.posts = []; st.nextPostId = 1; }
+    const people = alive(st).filter((r) => age(st, r) >= yearsToDays(5));
+    // その日の出来事への反応
+    const today = [];
+    for (let i = st.events.length - 1; i >= 0 && st.events[i].day === st.day; i--) today.unshift(st.events[i]);
+    for (const e of today) {
+      const main = e.ids.length ? byId(st, e.ids[0]) : null;
+      if (e.kind === 'birth' && main) {
+        const parent = byId(st, e.ids[rand(st) < 0.5 ? 1 : 2]);
+        if (parent && parent.alive) addPost(st, parent, pick(st, [`${main.name}が生まれた。小さな手が、指をにぎり返してきた`, `${main.name}が生まれた。泣き声が大きい。きっと強い子になる`, `家族が増えた。名前は${main.name}`]), 'big');
+      } else if (e.kind === 'couple' && main) {
+        const other = byId(st, e.ids[1]);
+        if (other) addPost(st, main, pick(st, [`${other.name}と一緒に暮らすことにした`, `${other.name}と火を囲む夜が、いちばん好きだ`]), 'big');
+      } else if (e.kind === 'death' && main) {
+        const mourners = people.filter((o) => o.partnerId === null && (o.parentIds.includes(main.id) || main.parentIds.includes(o.id)) || (o.memories.length && o.memories[o.memories.length - 1].text.includes(main.name)));
+        const m = mourners.length ? pick(st, mourners) : null;
+        if (m) addPost(st, m, pick(st, [`${main.name}がいなくなって、火のまわりが静かだ`, `${main.name}のことを、ずっと覚えている`, `${main.name}が最後に笑った顔を思い出す`]), 'big');
+      } else if (e.kind === 'invention' && main) {
+        const inv = st.inventions[st.inventions.length - 1];
+        addPost(st, main, pick(st, [`「${inv.name}」を作った。みんな目を丸くしていた`, `ずっと考えていたことが、やっと形になった。「${inv.name}」と呼ぶことにする`]), 'big');
+        const fan = pick(st, people);
+        if (fan && fan !== main) addPost(st, fan, `${main.name}の「${inv.name}」、すごい。真似してみる`, 'big');
+      } else if (e.kind === 'quarrel' && main && rand(st) < 0.5) {
+        const other = byId(st, e.ids[1]);
+        if (other) addPost(st, main, `${other.name}とはもう話したくない`, 'daily');
+      }
+    }
+    // ふだんのつぶやき
+    for (const r of people) {
+      if (rand(st) > 0.035 * (0.4 + r.traits.sociability)) continue;
+      let pool;
+      if (r.hunger > 50) pool = POST_LINES.hungry;
+      else if (season === 3 && rand(st) < 0.25) pool = has(st, 'fire') ? POST_LINES.cold : POST_LINES.coldNoFire;
+      else if (rand(st) < 0.2) pool = rand(st) < 0.7 ? POST_LINES.friend : POST_LINES.enemy;
+      else pool = POST_LINES[r.job] || POST_LINES.gather;
+      for (let i = 0; i < 3; i++) {
+        const text = fill(st, pick(st, pool), r);
+        if (text) { addPost(st, r, text, 'daily'); break; }
+      }
+    }
+  }
+
+  // 保存の大きさを抑える（共有の保存先は1つあたり256KBまで）
+  function prune(st) {
+    for (const r of st.residents) {
+      const ent = Object.entries(r.affinity);
+      if (ent.length > 16) {
+        ent.sort((x, y) => Math.abs(y[1]) - Math.abs(x[1]));
+        r.affinity = Object.fromEntries(ent.slice(0, 16));
+      }
+      if (!r.alive && r.memories.length > 6) r.memories = r.memories.slice(-6);
+    }
+    const dead = st.residents.filter((r) => !r.alive);
+    if (dead.length > 120) {
+      const drop = new Set(dead.slice(0, dead.length - 120).map((r) => r.id));
+      st.residents = st.residents.filter((r) => !drop.has(r.id));
+    }
+    if (st.events.length > 700) {
+      const keep = st.events.filter((e) => e.major || e.kind === 'invention');
+      const minor = st.events.filter((e) => !(e.major || e.kind === 'invention')).slice(-(700 - Math.min(keep.length, 300)));
+      st.events = [...keep.slice(-300), ...minor].sort((x, y) => x.day - y.day);
+    }
+    if (st.posts && st.posts.length > 400) st.posts.splice(0, st.posts.length - 400);
   }
 
   function buildHut(st, a, b) {
@@ -560,7 +687,7 @@
   }
 
   globalThis.AISim = {
-    T, MAP_W, MAP_H, SEASONS, INVENTIONS, JOB_NAMES, DAYS_PER_YEAR, DAYS_PER_SEASON, REAL_MS_PER_WORLD_DAY, WORLD_DAYS_PER_REAL_DAY,
+    prune, POST_LINES, T, MAP_W, MAP_H, SEASONS, INVENTIONS, JOB_NAMES, DAYS_PER_YEAR, DAYS_PER_SEASON, REAL_MS_PER_WORLD_DAY, WORLD_DAYS_PER_REAL_DAY,
     createWorld, stepDay, advanceTo, formatDate, formatSpan, traitLabel, byId, age, ageYears, alive, tileAt, has,
   };
 })();

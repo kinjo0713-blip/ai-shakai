@@ -34,7 +34,7 @@
   };
 
   let world = null;
-  let tab = 'events';
+  let tab = 'timeline';
   let showDead = false;
   let openPersonId = null;
 
@@ -343,23 +343,86 @@
   function renderPanel() {
     if (!world) return;
     const body = $('#tab-body');
+    const keepScroll = body.dataset.tab === tab ? body.scrollTop : 0;
+    body.dataset.tab = tab;
     body.replaceChildren();
-    if (tab === 'events') body.append(renderEvents());
+    if (tab === 'timeline') body.append(...renderTimeline());
     else if (tab === 'people') body.append(...renderPeople());
-    else if (tab === 'inventions') body.append(...renderInventions());
+    else if (tab === 'chronicle') body.append(...renderChronicle());
+    body.scrollTop = keepScroll;
   }
 
-  function renderEvents() {
-    const ul = el('ul', { class: 'events' });
-    const list = world.events.slice(-200).reverse().filter((e) => e.kind !== 'year');
-    for (const e of list) {
-      const target = e.ids.length ? e.ids[0] : null;
-      ul.append(el('li', {
-        class: (e.major ? 'major ' : '') + (target ? 'clickable' : ''),
-        onclick: target ? () => openPerson(target) : null,
-      }, el('span', { class: 'when' }, S.formatDate(e.day)), el('span', { class: 'text' }, e.text)));
+  // ---------- AIが書いた文章 ----------
+  // ai[key] = { ... }。key は inv-<発明id> / year-<年> / era-village
+  let ai = {};
+  const yearOf = (day) => Math.floor(day / S.DAYS_PER_YEAR) + 1;
+
+  function aiBadge() { return el('span', { class: 'ai-badge', title: '本物のAIが書いた文章です' }, 'AI'); }
+
+  function aiBanner() {
+    const tasks = pendingAiTasks();
+    if (aiState.busy) return el('div', { class: 'ai-banner busy' }, el('span', null, aiState.note || '住民が考えています…'), el('button', { class: 'ghost', onclick: () => aiState.stop && aiState.stop() }, '止める'));
+    if (!aiState.available || !tasks.length) return null;
+    return el('div', { class: 'ai-banner' },
+      el('span', null, `AIに語ってもらえる大事な場面が ${tasks.length} つあります`),
+      el('button', { class: 'primary small', onclick: runAiTasks }, '語ってもらう'));
+  }
+
+  // ---------- タイムライン ----------
+  function personHead(r, fallbackName, sub) {
+    const c = el('canvas', { class: 'avatar', width: 12, height: 16 });
+    if (r) drawPerson(c.getContext('2d'), r, 6, r.job === 'child' ? 12 : 14, 2);
+    return el('div', { class: 'post-head' }, c,
+      el('span', { class: 'who' }, r ? el('button', { class: 'name-link', onclick: () => openPerson(r.id) }, r.name) : fallbackName),
+      el('span', { class: 'post-sub' }, sub));
+  }
+
+  function timelineItems() {
+    const items = [];
+    for (const p of (world.posts || []).slice(-160)) items.push({ day: p.day, t: p.t, type: 'post', p });
+    for (const e of world.events.slice(-120)) if (e.major && e.kind !== 'invention') items.push({ day: e.day, t: 0.95, type: 'news', e });
+    for (const i of world.inventions) items.push({ day: i.day, t: 0.97, type: 'invention', i });
+    for (const k in ai) {
+      const a = ai[k];
+      if (k.startsWith('year-')) items.push({ day: (+k.slice(5)) * S.DAYS_PER_YEAR, t: 0.01, type: 'ai-news', a, year: +k.slice(5) });
+      if (k.startsWith('inv-') && a.voice) { const inv = world.inventions.find((i) => 'inv-' + i.id === k); if (inv) items.push({ day: inv.day, t: 0.98, type: 'ai-voice', a, by: inv.by }); }
+      if (k === 'era-village' && a.voice) items.push({ day: a.day || world.day, t: 0.99, type: 'ai-voice', a, by: a.by });
     }
-    return ul;
+    items.sort((x, y) => (y.day - x.day) || (y.t - x.t));
+    return items.slice(0, 220);
+  }
+
+  function renderTimeline() {
+    const ul = el('ul', { class: 'feed' });
+    for (const it of timelineItems()) {
+      const when = S.formatDate(it.day);
+      if (it.type === 'post') {
+        const r = S.byId(world, it.p.by);
+        if (!r) continue;
+        ul.append(el('li', { class: 'post' + (it.p.kind === 'big' ? ' big' : '') },
+          personHead(r, '', `${S.ageYears(world, r) - Math.floor((world.day - it.p.day) / S.DAYS_PER_YEAR)}歳・${S.JOB_NAMES[r.job]}・${when}`),
+          el('p', { class: 'post-text' }, it.p.gesture ? el('span', { class: 'gesture', title: 'まだ言葉がないため、身ぶりを書き留めたものです' }, '身ぶり') : null, it.p.text),
+          el('div', { class: 'post-foot' }, `♥ ${it.p.likes}`)));
+      } else if (it.type === 'news' || it.type === 'invention') {
+        const text = it.type === 'news' ? it.e.text : (() => { const w = S.byId(world, it.i.by); return `${w ? w.name : '誰か'}が「${it.i.name}」を発明した`; })();
+        const target = it.type === 'news' ? it.e.ids[0] : it.i.by;
+        ul.append(el('li', { class: 'news' + (target ? ' clickable' : ''), onclick: target ? () => openPerson(target) : null },
+          el('div', { class: 'news-head' }, el('span', { class: 'news-src' }, '世界の記録'), el('span', { class: 'post-sub' }, when)),
+          el('p', { class: 'post-text' }, text)));
+      } else if (it.type === 'ai-news') {
+        ul.append(el('li', { class: 'news ai' },
+          el('div', { class: 'news-head' }, el('span', { class: 'news-src' }, 'AI世界通信'), aiBadge(), el('span', { class: 'post-sub' }, `${it.year}年目のまとめ`)),
+          el('h4', { class: 'news-title' }, it.a.headline || ''),
+          el('p', { class: 'post-text' }, it.a.body || '')));
+      } else if (it.type === 'ai-voice') {
+        const r = S.byId(world, it.by);
+        ul.append(el('li', { class: 'post big ai' },
+          personHead(r, '誰か', when),
+          el('p', { class: 'post-text' }, aiBadge(), it.a.voice)));
+      }
+    }
+    if (!ul.children.length) ul.append(el('li', { class: 'empty' }, 'まだ誰も何も言っていません。住民たちは、言葉を持つ前に身ぶりで気持ちを伝えはじめます。'));
+    return [aiBanner(), ul].filter(Boolean);
   }
 
   const barColor = (v) => (v > 60 ? 'var(--good)' : v > 30 ? 'var(--warn)' : 'var(--bad)');
@@ -381,20 +444,37 @@
     return [head, ul];
   }
 
-  function renderInventions() {
-    const ul = el('ul', { class: 'inv' });
+  // ---------- 年表 ----------
+  const ERAS = ['原始', '村', '町', '街', '国'];
+  function renderChronicle() {
+    const eraIdx = 0;
+    const eraBar = el('ol', { class: 'eras', 'aria-label': '時代の歩み' },
+      ...ERAS.map((n, i) => el('li', { class: i < eraIdx ? 'done' : i === eraIdx ? 'now' : '' }, el('span', null, n),
+        i === eraIdx ? el('small', null, world.villageReady ? '村の入り口' : 'いまここ') : null)));
+
+    const byYear = new Map();
+    const add = (y, node) => { if (!byYear.has(y)) byYear.set(y, []); byYear.get(y).push(node); };
     for (const i of world.inventions) {
       const who = S.byId(world, i.by);
       const def = S.INVENTIONS.find((d) => d.id === i.id);
-      ul.append(el('li', null,
-        el('span', { class: 'yr' }, `${Math.floor(i.day / S.DAYS_PER_YEAR) + 1}年目`),
-        el('span', { class: 'nm' }, i.name),
-        el('span', { class: 'by' }, `${who ? who.name : '誰か'}が発明。${def ? def.text : ''}`)));
+      const a = ai['inv-' + i.id];
+      add(yearOf(i.day), el('li', { class: 'ch-inv' },
+        el('span', { class: 'ch-mark' }, i.name),
+        el('div', null,
+          el('p', null, a && a.story ? [aiBadge(), a.story] : `${who ? who.name : '誰か'}が発明した。${def ? def.text : ''}`))));
     }
+    for (const e of world.events) {
+      if (!e.major || e.kind === 'invention' || e.kind === 'famine') continue;
+      add(yearOf(e.day), el('li', null, el('span', { class: 'ch-dot' }), el('p', null, e.text)));
+    }
+    if (ai['era-village'] && ai['era-village'].story) add(yearOf(ai['era-village'].day || world.day), el('li', { class: 'ch-inv' }, el('span', { class: 'ch-mark' }, '村へ'), el('div', null, el('p', null, aiBadge(), ai['era-village'].story))));
+    for (const k in ai) if (k.startsWith('year-')) add(+k.slice(5), el('li', { class: 'ch-news' }, el('span', { class: 'ch-dot' }), el('p', null, aiBadge(), ai[k].headline || '')));
+
+    const years = [...byYear.keys()].sort((a, b) => b - a);
+    const list = el('div', { class: 'chron' }, ...years.map((y) => el('section', null, el('h3', { class: 'ch-year' }, `${y}年目`), el('ul', null, ...byYear.get(y)))));
     const left = S.INVENTIONS.length - world.inventions.length;
-    if (left > 0) ul.append(el('li', { class: 'unknown' }, el('span', { class: 'yr' }, 'これから'), el('span', { class: 'nm' }, '？？？'), el('span', { class: 'by' }, `まだ誰も思いついていない発明が、あと${left}つあります`)));
-    const note = el('p', { class: 'panel-note' }, '発明は、好奇心の強い住民が知恵をためると生まれます。次の段階では、本物のAIが発明の物語を書きます。');
-    return [ul, note];
+    const note = el('p', { class: 'panel-note' }, left > 0 ? `まだ誰も思いついていない発明が、あと${left}つあります。` : 'この時代の発明は出そろいました。');
+    return [aiBanner(), eraBar, note, list].filter(Boolean);
   }
 
   // ---------- 住民の紹介 ----------
@@ -427,6 +507,10 @@
         parents.length ? el('div', null, el('h3', null, '親'), el('div', { class: 'links' }, ...parents.map(link))) : null,
         kids.length ? el('div', null, el('h3', null, `子ども（${kids.length}人）`), el('div', { class: 'links' }, ...kids.map(link))) : null) : null,
       friends.length ? el('div', null, el('h3', null, '仲のよい相手'), el('div', { class: 'links' }, ...friends.map(link))) : null,
+      (() => {
+        const ps = (world.posts || []).filter((p) => p.by === r.id).slice(-4).reverse();
+        return ps.length ? el('div', null, el('h3', null, 'さいきんのつぶやき'), el('ul', { class: 'memories' }, ...ps.map((p) => el('li', null, el('span', { class: 'when' }, S.formatDate(p.day)), el('span', null, (p.gesture ? '（身ぶり）' : '') + p.text))))) : null;
+      })(),
       el('div', null, el('h3', null, '思い出'),
         el('ul', { class: 'memories' }, ...r.memories.slice().reverse().map((m) => el('li', null, el('span', { class: 'when' }, S.formatDate(m.day)), el('span', null, m.text))))),
       el('button', { class: 'primary', onclick: closeOverlay }, '閉じる'));
@@ -478,12 +562,12 @@
       el('ul', null,
         el('li', null, '現実の1日で、世界では3か月（90日）が過ぎます。世界の1年は360日です。'),
         el('li', null, `世界が始まってから ${S.formatSpan(world.day)} が経ちました。`),
-        el('li', null, 'この世界はこの端末のブラウザに保存されています。ほかの端末とはまだつながっていません。'),
-        el('li', null, '今は第1段階です。住民は決まりごとだけで暮らしています。')),
+        el('li', null, shared.db ? 'この世界は claude.ai に保存され、スマホでもパソコンでも同じ世界が見られます。' : 'この世界はこの端末のブラウザに保存されています。claude.ai で開くと、ほかの端末とも同じ世界になります。'),
+        el('li', null, 'ふだんの暮らしは決まりごとで動きます。発明や村の誕生、1年のまとめなど大事な場面だけ、本物のAI（Claude）が考えます。AIはあなたのClaudeの利用枠を少し使います。')),
       el('div', { class: 'row' },
         el('button', { class: 'danger', onclick: (e) => {
           const b = e.currentTarget;
-          if (b.dataset.armed) { clearSave(); startNew(); return; }
+          if (b.dataset.armed) { clearSave(); closeOverlay(); startNew(); return; }
           b.dataset.armed = '1'; b.textContent = 'もう一度押すと、今の世界は消えます';
         } }, '世界をはじめからやり直す'),
         el('button', { class: 'primary', onclick: closeOverlay }, '閉じる')));
@@ -499,6 +583,7 @@
       const before = world.day;
       S.advanceTo(world, Date.now());
       if (world.day !== before) {
+        scheduleSharedWrite(false);
         renderTop();
         if (currentView !== 'map' || window.innerWidth > 820) renderPanel();
       }
@@ -521,15 +606,190 @@
       if (first) afterLoad(); else { renderTop(); renderPanel(); }
       save();
       busy = false;
+      scheduleSharedWrite(true);
       showSummary(sum, false);
     }, 60);
   }
 
+  // ---------- 共有の保存（claude.ai で開いたとき、スマホとパソコンで同じ世界を見る） ----------
+  const shared = { db: null, device: Math.random().toString(36).slice(2), remoteDay: -1, writing: false, timer: null, lastWrite: 0 };
+  const PEOPLE_CHUNK = 45;
+  const clone = (o) => JSON.parse(JSON.stringify(o));
+
+  async function readShared(db) {
+    const c = await db.doc('world/core').get();
+    if (!c.exists) return null;
+    const core = clone(c.data());
+    const n = core.peopleChunks || 0;
+    const parts = await Promise.all([db.doc('world/events').get(), db.doc('world/posts').get(), ...Array.from({ length: n }, (_, i) => db.doc('world/people' + i).get())]);
+    const list = (snap) => (snap.exists ? clone(snap.data().list || []) : []);
+    const st = { ...core, events: list(parts[0]), posts: list(parts[1]), residents: parts.slice(2).flatMap(list) };
+    delete st.peopleChunks; delete st.writer;
+    return st.version === 1 && st.residents.length ? st : null;
+  }
+
+  async function writeShared() {
+    if (!shared.db || !world || shared.writing || busy) return;
+    if (world.day < shared.remoteDay) return; // 先に進んでいる端末がある
+    shared.writing = true;
+    try {
+      const { residents, events, posts, ...core } = world;
+      const chunks = [];
+      for (let i = 0; i < residents.length; i += PEOPLE_CHUNK) chunks.push(residents.slice(i, i + PEOPLE_CHUNK));
+      for (let i = 0; i < chunks.length; i++) await shared.db.doc('world/people' + i).set({ list: chunks[i] });
+      await shared.db.doc('world/events').set({ list: events.slice(-500) });
+      await shared.db.doc('world/posts').set({ list: (posts || []).slice(-400) });
+      await shared.db.doc('world/core').set({ ...core, peopleChunks: chunks.length, writer: shared.device });
+      shared.remoteDay = world.day;
+      shared.lastWrite = Date.now();
+    } catch (e) {
+      console.warn('共有の保存に失敗しました', e && e.code);
+    } finally {
+      shared.writing = false;
+    }
+  }
+  function scheduleSharedWrite(now) {
+    if (!shared.db) return;
+    clearTimeout(shared.timer);
+    const wait = now ? 0 : Math.max(0, 5 * 60000 - (Date.now() - shared.lastWrite));
+    shared.timer = setTimeout(writeShared, wait);
+  }
+
+  function subscribeShared(db) {
+    db.doc('world/core').onSnapshot(async (snap) => {
+      if (!snap.exists || snap.metadata.hasPendingWrites) return;
+      const d = snap.data();
+      shared.remoteDay = Math.max(shared.remoteDay, d.day || 0);
+      if (d.writer === shared.device || !world) return;
+      const otherWorld = d.seed !== world.seed && d.createdAt > world.createdAt;
+      if (otherWorld || (d.seed === world.seed && d.day > world.day + 1)) {
+        try {
+          const remote = await readShared(db);
+          if (remote) { enterWorld(remote, otherWorld); }
+        } catch (e) { /* 次の更新を待つ */ }
+      }
+    }, () => {});
+    db.doc('world/ai').onSnapshot((snap) => {
+      if (!snap.exists || !world) return;
+      const d = snap.data();
+      if (d.seed !== world.seed) return;
+      ai = clone(d.texts || {});
+      saveAiLocal();
+      renderPanel();
+    }, () => {});
+  }
+
+  // ---------- AI（大事な場面だけ、本物のAIが考える） ----------
+  const AI_KEY = 'ai-shakai-ai-v1';
+  const aiState = { sample: null, available: false, busy: false, note: '', stop: null };
+  function loadAiLocal() {
+    try { const d = JSON.parse(localStorage.getItem(AI_KEY) || 'null'); ai = d && world && d.seed === world.seed ? d.texts : {}; } catch (e) { ai = {}; }
+  }
+  function saveAiLocal() { try { localStorage.setItem(AI_KEY, JSON.stringify({ seed: world.seed, texts: ai })); } catch (e) { /* なにもしない */ } }
+  async function saveAi(key, val) {
+    ai[key] = val;
+    saveAiLocal();
+    if (!shared.db) return;
+    const ref = shared.db.doc('world/ai');
+    try {
+      const cur = await ref.get();
+      if (cur.exists && cur.data().seed === world.seed) await ref.update({ texts: { [key]: val } });
+      else await ref.set({ seed: world.seed, texts: { [key]: val } });
+    } catch (e) { console.warn('AIの文章を共有できませんでした', e && e.code); }
+  }
+
+  function pendingAiTasks() {
+    if (!world) return [];
+    const t = [];
+    for (const i of world.inventions.slice(-3)) if (!ai['inv-' + i.id]) t.push({ key: 'inv-' + i.id, kind: 'inv', inv: i });
+    if (world.villageReady && !ai['era-village']) t.push({ key: 'era-village', kind: 'era' });
+    const done = Math.floor(world.day / S.DAYS_PER_YEAR);
+    for (let y = done; y >= Math.max(1, done - 1); y--) {
+      if (ai['year-' + y]) continue;
+      if (world.events.some((e) => yearOf(e.day) === y && e.kind !== 'year')) t.push({ key: 'year-' + y, kind: 'year', year: y });
+    }
+    return t.slice(0, 4);
+  }
+
+  function describePerson(r) {
+    if (!r) return '（記録が残っていない人）';
+    const tr = ['curiosity', 'caution', 'sociability'].map((k) => S.traitLabel(k, r.traits[k])).join('・');
+    const mem = r.memories.slice(-5).map((m) => m.text).join(' / ');
+    return `${r.name}（${r.sex === 'm' ? '男' : '女'}、${S.ageYears(world, r)}歳、${S.JOB_NAMES[r.job]}、性格: ${tr}）。最近の出来事: ${mem}`;
+  }
+
+  function worldContext() {
+    return [
+      'あなたは、AIの住民だけが暮らす架空の世界の語り部です。人間は一人もいません。',
+      `世界: 「名もなき土地」。時代: 原始${world.villageReady ? '（村になりかけている）' : ''}。いまは${S.formatDate(world.day)}。住民${S.alive(world).length}人。`,
+      `これまでの発明: ${world.inventions.map((i) => i.name).join('、') || 'まだない'}。`,
+      S.has(world, 'words') ? '住民は言葉を話す。' : '住民はまだ言葉を持たず、身ぶりと声で気持ちを伝える。',
+      '書き方: やさしい日本語。実在の人物・企業・国・現代の道具は出さない。暴力や不安をあおる表現は控えめに。',
+    ].join('\n');
+  }
+
+  function buildPrompt(task) {
+    if (task.kind === 'inv') {
+      const r = S.byId(world, task.inv.by);
+      const hadWords = world.inventions.findIndex((i) => i.id === 'words') >= 0 && world.inventions.find((i) => i.id === 'words').day <= task.inv.day;
+      return `${worldContext()}\n\n${yearOf(task.inv.day)}年目に「${task.inv.name}」が発明されました。\n発明者: ${describePerson(r)}\nこの時点で言葉は${hadWords ? 'ある' : 'まだない'}。\n\n次の形のJSONだけを返してください。\n{"story": "発明が生まれた場面。情景が浮かぶ2〜3文、120字以内", "voice": "発明者本人の一言、40字以内。言葉がまだないなら（）で身ぶりや声の様子を描く"}`;
+    }
+    if (task.kind === 'era') {
+      const elder = S.alive(world).filter((r) => r.job !== 'child').sort((a, b) => a.birthDay - b.birthDay)[0];
+      task.by = elder ? elder.id : null;
+      return `${worldContext()}\n\n畑が広がり、人が増え、この集まりは「村」と呼べるほどになりました。\n最年長の住民: ${describePerson(elder)}\n\n次の形のJSONだけを返してください。\n{"story": "村が生まれつつある様子。2〜3文、120字以内", "voice": "最年長の住民が皆に語りかける一言、50字以内"}`;
+    }
+    const evs = world.events.filter((e) => yearOf(e.day) === task.year && e.kind !== 'year').slice(-25).map((e) => '- ' + e.text).join('\n');
+    return `${worldContext()}\n\n${task.year}年目に起きたこと:\n${evs}\n\nこの1年を振り返る、世界の新聞「AI世界通信」の記事を書いてください。次の形のJSONだけを返してください。\n{"headline": "見出し、25字以内", "body": "記事、150字以内。いちばん印象的な出来事を中心に"}`;
+  }
+
+  const cut = (s, n) => (typeof s === 'string' ? s.trim().slice(0, n) : '');
+
+  async function runAiTasks() {
+    if (aiState.busy || !aiState.sample) return;
+    const tasks = pendingAiTasks();
+    if (!tasks.length) return;
+    const ctl = new AbortController();
+    aiState.busy = true; aiState.stop = () => ctl.abort();
+    try {
+      for (let i = 0; i < tasks.length; i++) {
+        const task = tasks[i];
+        aiState.note = `住民が考えています…（${i + 1}/${tasks.length}）`;
+        renderPanel();
+        const res = await aiState.sample.json(buildPrompt(task), { signal: ctl.signal });
+        if (task.kind === 'year') await saveAi(task.key, { headline: cut(res.headline, 40), body: cut(res.body, 240) });
+        else if (task.kind === 'inv') await saveAi(task.key, { story: cut(res.story, 200), voice: cut(res.voice, 80) });
+        else await saveAi(task.key, { story: cut(res.story, 200), voice: cut(res.voice, 90), by: task.by, day: world.day });
+      }
+      aiState.note = '';
+    } catch (e) {
+      const code = e && e.code;
+      if (code === 'not_granted') aiState.available = false;
+      aiState.note = '';
+      if (code === 'rate_limited') toast('いまはAIを使えません。しばらくしてからもう一度試してください');
+      else if (code && code !== 'aborted' && code !== 'not_granted') toast('AIの返事をうまく受け取れませんでした');
+    } finally {
+      aiState.busy = false; aiState.stop = null;
+      renderPanel();
+    }
+  }
+
+  function toast(msg) {
+    const t = el('div', { class: 'toast', role: 'status' }, msg);
+    document.body.append(t);
+    setTimeout(() => t.remove(), 4000);
+  }
+
+  // ---------- はじめに ----------
   function startNew() {
     const seed = (Date.now() ^ Math.floor(Math.random() * 1e9)) >>> 0;
     world = S.createWorld(seed, Date.now());
+    ai = {};
+    saveAiLocal();
     afterLoad();
     save();
+    scheduleSharedWrite(true);
+    if (shared.db) shared.db.doc('world/ai').set({ seed, texts: {} }).catch(() => {});
     showSummary(null, true);
   }
 
@@ -541,17 +801,39 @@
     renderPanel();
   }
 
-  function boot() {
-    const saved = load();
-    if (!saved) { startNew(); return; }
-    world = saved;
+  // 世界に入る：留守のあいだを計算してまとめを見せる
+  function enterWorld(st, announce) {
+    world = st;
+    loadAiLocal();
     const pendingDays = (Date.now() - world.lastRealTime) / S.REAL_MS_PER_WORLD_DAY;
-    if (pendingDays >= 1) {
-      catchUp(true);
-    } else {
-      S.advanceTo(world, Date.now());
-      afterLoad();
+    if (pendingDays >= 1 && announce !== false) catchUp(true);
+    else { S.advanceTo(world, Date.now()); afterLoad(); save(); }
+  }
+
+  async function boot() {
+    const saved = load();
+    if (saved) enterWorld(saved, true);
+    else showOverlay(el('div', { class: 'loading' }, el('div', null, '世界を探しています…'), el('div', { class: 'bar' }, el('i'))));
+    const db = window.claude && window.claude.use ? await window.claude.use('db').catch(() => null) : null;
+    shared.db = db;
+    if (db) {
+      let remote = null;
+      try { remote = await readShared(db); } catch (e) { remote = null; }
+      if (remote && (!world || remote.seed !== world.seed)) {
+        while (busy) await new Promise((r) => setTimeout(r, 100));
+        enterWorld(remote, true);
+      } else if (remote && remote.seed === world.seed && remote.day > world.day) {
+        enterWorld(remote, false);
+      } else if (world) {
+        scheduleSharedWrite(true); // この端末の世界を、共有の世界として登録する
+      }
+      subscribeShared(db);
     }
+    if (!world) startNew();
+    const sample = window.claude && window.claude.use ? await window.claude.use('sample').catch(() => null) : null;
+    aiState.sample = sample;
+    aiState.available = !!sample;
+    renderPanel();
   }
 
   // ---------- 動作確認用（#debug のときだけ） ----------
@@ -567,7 +849,7 @@
   for (const b of document.querySelectorAll('.tabs [data-tab]')) b.addEventListener('click', () => setTab(b.dataset.tab));
   for (const b of document.querySelectorAll('.bottom-nav [data-view]')) b.addEventListener('click', () => setView(b.dataset.view));
   window.addEventListener('resize', resize);
-  document.addEventListener('visibilitychange', () => { if (document.hidden) save(); else if (world) {
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { save(); scheduleSharedWrite(true); } else if (world) {
     const pendingDays = (Date.now() - world.lastRealTime) / S.REAL_MS_PER_WORLD_DAY;
     if (pendingDays >= 1) catchUp(false);
   } });
